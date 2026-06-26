@@ -155,12 +155,11 @@ abstract class GenerateDebugKeystoreTask : DefaultTask() {
   }
 }
 
-// Auto-generate a debug.keystore at the project root if one doesn't already exist.
-// This prevents ":app:validateSigningDebug" (and release builds that fall back to this
-// keystore) from failing on fresh checkouts / CI machines where debug.keystore was
-// never committed (it's normally gitignored).
+// Auto-generate a debug.keystore at the PROJECT ROOT (not the app module folder) if one
+// doesn't already exist. Must match the path used by signingConfigs above ("${rootDir}/debug.keystore"),
+// otherwise the keystore gets created in the wrong place and validateSigningDebug still fails.
 val generateDebugKeystore = tasks.register<GenerateDebugKeystoreTask>("generateDebugKeystore") {
-  keystoreFile.set(layout.projectDirectory.file("debug.keystore"))
+  keystoreFile.set(File(rootDir, "debug.keystore"))
   javaHome.set(System.getProperty("java.home"))
 }
 
