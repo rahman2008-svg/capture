@@ -1,5 +1,6 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
 import java.io.ByteArrayOutputStream
+import javax.inject.Inject
 
 plugins {
   alias(libs.plugins.android.application)
@@ -92,55 +93,75 @@ googleServices {
   missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN
 }
 
+// Task type that generates a debug.keystore if one doesn't already exist.
+// Uses an injected ExecOperations instead of the deprecated/removed Project.exec
+// extension so this works under Gradle's configuration cache (Gradle 9.x+).
+abstract class GenerateDebugKeystoreTask : DefaultTask() {
+
+  @get:Inject
+  abstract val execOperations: ExecOperations
+
+  @get:OutputFile
+  abstract val keystoreFile: RegularFileProperty
+
+  @get:Internal
+  abstract val javaHome: Property<String>
+
+  @TaskAction
+  fun generate() {
+    val ksFile = keystoreFile.get().asFile
+    if (ksFile.exists()) {
+      logger.lifecycle("debug.keystore already exists at ${ksFile.absolutePath}, skipping generation.")
+      return
+    }
+
+    logger.lifecycle("debug.keystore not found at ${ksFile.absolutePath} — generating one now.")
+    val keytoolCandidate = File(javaHome.get(), "bin/keytool")
+    val keytoolPath = if (keytoolCandidate.exists()) keytoolCandidate.absolutePath else "keytool"
+
+    val stdout = ByteArrayOutputStream()
+    val stderr = ByteArrayOutputStream()
+    val result = execOperations.exec {
+      commandLine(
+        keytoolPath,
+        "-genkey", "-v",
+        "-keystore", ksFile.absolutePath,
+        "-storetype", "PKCS12",
+        "-alias", "androiddebugkey",
+        "-storepass", "android",
+        "-keypass", "android",
+        "-keyalg", "RSA",
+        "-keysize", "2048",
+        "-validity", "10000",
+        "-dname", "CN=Android Debug,O=Android,C=US"
+      )
+      standardOutput = stdout
+      errorOutput = stderr
+      isIgnoreExitValue = true
+    }
+
+    if (result.exitValue != 0 || !ksFile.exists()) {
+      throw GradleException(
+        "Failed to auto-generate debug.keystore via keytool.\n" +
+          "stdout:\n$stdout\n" +
+          "stderr:\n$stderr\n" +
+          "You can generate it manually with:\n" +
+          "keytool -genkey -v -keystore debug.keystore -storetype PKCS12 " +
+          "-alias androiddebugkey -storepass android -keypass android " +
+          "-keyalg RSA -keysize 2048 -validity 10000 -dname \"CN=Android Debug,O=Android,C=US\""
+      )
+    }
+    logger.lifecycle("debug.keystore generated successfully at ${ksFile.absolutePath}.")
+  }
+}
+
 // Auto-generate a debug.keystore at the project root if one doesn't already exist.
 // This prevents ":app:validateSigningDebug" (and release builds that fall back to this
 // keystore) from failing on fresh checkouts / CI machines where debug.keystore was
 // never committed (it's normally gitignored).
-val generateDebugKeystore by tasks.registering {
-  val keystoreFile = file("${rootDir}/debug.keystore")
-  outputs.file(keystoreFile)
-
-  doLast {
-    if (!keystoreFile.exists()) {
-      logger.lifecycle("debug.keystore not found at ${keystoreFile.absolutePath} — generating one now.")
-      val javaHome = System.getProperty("java.home")
-      val keytoolPath = file("$javaHome/bin/keytool").let { if (it.exists()) it.absolutePath else "keytool" }
-
-      val stdout = ByteArrayOutputStream()
-      val stderr = ByteArrayOutputStream()
-      val result = project.exec {
-        commandLine(
-          keytoolPath,
-          "-genkey", "-v",
-          "-keystore", keystoreFile.absolutePath,
-          "-storetype", "PKCS12",
-          "-alias", "androiddebugkey",
-          "-storepass", "android",
-          "-keypass", "android",
-          "-keyalg", "RSA",
-          "-keysize", "2048",
-          "-validity", "10000",
-          "-dname", "CN=Android Debug,O=Android,C=US"
-        )
-        standardOutput = stdout
-        errorOutput = stderr
-        isIgnoreExitValue = true
-      }
-
-      if (result.exitValue != 0 || !keystoreFile.exists()) {
-        throw GradleException(
-          "Failed to auto-generate debug.keystore via keytool.\n" +
-            "stdout:\n${stdout}\n" +
-            "stderr:\n${stderr}\n" +
-            "You can generate it manually with:\n" +
-            "keytool -genkey -v -keystore debug.keystore -storetype PKCS12 " +
-            "-alias androiddebugkey -storepass android -keypass android " +
-            "-keyalg RSA -keysize 2048 -validity 10000 -dname \"CN=Android Debug,O=Android,C=US\""
-        )
-      }
-      logger.lifecycle("debug.keystore generated successfully at ${keystoreFile.absolutePath}.")
-    }
-  }
+val generateDebugKeystore = tasks.register<GenerateDebugKeystoreTask>("generateDebugKeystore") {
+  keystoreFile.set(layout.projectDirectory.file("debug.keystore"))
+  javaHome.set(System.getProperty("java.home"))
 }
 
 // Make sure the keystore exists before Gradle tries to validate any signing config
