@@ -1,4 +1,5 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import java.io.ByteArrayOutputStream
 
 plugins {
   alias(libs.plugins.android.application)
@@ -25,11 +26,30 @@ android {
 
   signingConfigs {
     create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+      val envKeystorePath = System.getenv("KEYSTORE_PATH")
+      val envStorePassword = System.getenv("STORE_PASSWORD")
+      val envKeyPassword = System.getenv("KEY_PASSWORD")
+      val hasReleaseCreds = envKeystorePath != null &&
+        envStorePassword != null &&
+        envKeyPassword != null &&
+        file(envKeystorePath).exists()
+
+      if (hasReleaseCreds) {
+        storeFile = file(envKeystorePath!!)
+        storePassword = envStorePassword
+        keyAlias = "upload"
+        keyPassword = envKeyPassword
+      } else {
+        logger.warn(
+          "Release signing credentials not found (KEYSTORE_PATH/STORE_PASSWORD/KEY_PASSWORD). " +
+            "Falling back to the debug keystore for the release build type. " +
+            "Set those env vars before publishing a real release build."
+        )
+        storeFile = file("${rootDir}/debug.keystore")
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+      }
     }
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
@@ -72,6 +92,62 @@ googleServices {
   missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN
 }
 
+// Auto-generate a debug.keystore at the project root if one doesn't already exist.
+// This prevents ":app:validateSigningDebug" (and release builds that fall back to this
+// keystore) from failing on fresh checkouts / CI machines where debug.keystore was
+// never committed (it's normally gitignored).
+val generateDebugKeystore by tasks.registering {
+  val keystoreFile = file("${rootDir}/debug.keystore")
+  outputs.file(keystoreFile)
+
+  doLast {
+    if (!keystoreFile.exists()) {
+      logger.lifecycle("debug.keystore not found at ${keystoreFile.absolutePath} — generating one now.")
+      val javaHome = System.getProperty("java.home")
+      val keytoolPath = file("$javaHome/bin/keytool").let { if (it.exists()) it.absolutePath else "keytool" }
+
+      val stdout = ByteArrayOutputStream()
+      val stderr = ByteArrayOutputStream()
+      val result = project.exec {
+        commandLine(
+          keytoolPath,
+          "-genkey", "-v",
+          "-keystore", keystoreFile.absolutePath,
+          "-storetype", "PKCS12",
+          "-alias", "androiddebugkey",
+          "-storepass", "android",
+          "-keypass", "android",
+          "-keyalg", "RSA",
+          "-keysize", "2048",
+          "-validity", "10000",
+          "-dname", "CN=Android Debug,O=Android,C=US"
+        )
+        standardOutput = stdout
+        errorOutput = stderr
+        isIgnoreExitValue = true
+      }
+
+      if (result.exitValue != 0 || !keystoreFile.exists()) {
+        throw GradleException(
+          "Failed to auto-generate debug.keystore via keytool.\n" +
+            "stdout:\n${stdout}\n" +
+            "stderr:\n${stderr}\n" +
+            "You can generate it manually with:\n" +
+            "keytool -genkey -v -keystore debug.keystore -storetype PKCS12 " +
+            "-alias androiddebugkey -storepass android -keypass android " +
+            "-keyalg RSA -keysize 2048 -validity 10000 -dname \"CN=Android Debug,O=Android,C=US\""
+        )
+      }
+      logger.lifecycle("debug.keystore generated successfully at ${keystoreFile.absolutePath}.")
+    }
+  }
+}
+
+// Make sure the keystore exists before Gradle tries to validate any signing config
+// that depends on it (debug build type, and release when it falls back to debug signing).
+tasks.matching { it.name.startsWith("validateSigning") }.configureEach {
+  dependsOn(generateDebugKeystore)
+}
 
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
